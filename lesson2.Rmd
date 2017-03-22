@@ -12,6 +12,7 @@ library(clusterProfiler)
 library(org.Hs.eg.db)
 library(pheatmap)
 library(dplyr)
+library(VennDiagram)
 options(width=120)
 ```
 
@@ -188,12 +189,34 @@ ggplot(gdata_both, aes(x, y)) +
                                 "Not significant" = "black")) +
   labs(colour="Significance")
 ###
-#_22/03
 ```
 
 Также мы можем построить тепловую карту отсортировав гены по статистике
 
 ```{r heatmap}
+###TASK 3: PATHWAY GO:0007159: leukocyte cell-cell adhesion
+kkeys <- keys(org.Hs.eg.db, keytype="ENSEMBL")
+goAnno <- AnnotationDbi::select(org.Hs.eg.db, keys=kkeys, 
+                                keytype="ENSEMBL", columns=c("GOALL", "ONTOLOGYALL", "SYMBOL"))
+goAnno <- tbl_df(goAnno)
+goAnno <- filter(goAnno, GOALL=="GO:0007159")
+# or you can pick ENTREZ, or SYMBOL, or whatever you want
+genesToVisualise <- goAnno$ENSEMBL
+##
+res <- res[order(res$stat),]
+genesToVisualise <- rownames(res)[rownames(res) %in% genesToVisualise]
+
+to_visualise_7159 <- counts.norm[genesToVisualise, ]
+to_visualise_7159 <- t(apply(to_visualise_7159, 1, function(r) {
+  (r - min(r)) / (max(r) - min(r))
+}))
+
+pheatmap(to_visualise_7159, 
+         show_rownames = F, cluster_rows = F,
+         cluster_cols=T,
+         annotation_col = conditions,
+         main="GO:0007159: leukocyte cell-cell adhesion")
+###
 
 counts.norm <- counts(dds, normalized=TRUE)
 # png("heatmap_large.png", width=6, height=20, units="in", res=300)
@@ -209,6 +232,35 @@ pheatmap(to_visualise,
          annotation_col = conditions)
 # dev.off()
 
+```
+
+
+```{r VennDiagram, cache=TRUE, message=FALSE}
+###TASK 4: VennDiagram for Treg vs Tconv & Tumor breast vs Normal breast
+dds_tis <- DESeqDataSetFromMatrix(countData = counts,
+                              colData = conditions,
+                              design = ~ tissue)
+dds_tis <- dds_tis[rowSums(counts(dds_tis)) > 20, ]
+dds_tis <- DESeq(dds_tis)
+res_tis <- results(dds_tis)
+res_tis <- res_tis[order(res_tis[, 4]), ]
+
+dds_cells <- DESeqDataSetFromMatrix(countData = counts,
+                              colData = conditions,
+                              design = ~ cells)
+dds_cells <- dds_cells[rowSums(counts(dds_cells)) > 20, ]
+dds_cells <- DESeq(dds_cells)
+res_cells <- results(dds_cells)
+res_cells <- res_cells[order(res_cells[, 4]), ]
+
+#setA <- rownames(subset(res, res$padj < 0.01))
+#setB <- rownames(subset(res2, res2$padj < 0.01))
+setA <- rownames(subset(res_tis, res_tis$padj < 0.01))
+setB <- rownames(subset(res_cells, res_cells$padj < 0.01))
+commonGenes <- intersect(setA, setB)
+
+draw.pairwise.venn(length(setA), length(setB), length(commonGenes), category = c("Tumor tissue VS normal tissue", "Treg VS Tconv"), fill = c("cornflowerblue", "lightcoral"))
+###
 ```
 
 # clusterProfiler
