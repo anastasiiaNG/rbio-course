@@ -1,0 +1,294 @@
+---
+title: "Rna-seq analysis"
+author: "octopus"
+date: "March 22, 2017"
+output: html_document
+---
+
+```{r setup, message=FALSE}
+library(DESeq2)
+library(ggplot2)
+library(clusterProfiler)
+library(org.Hs.eg.db)
+library(pheatmap)
+library(dplyr)
+library(VennDiagram)
+options(width=120)
+```
+
+## Файлы с которыми будем работать сегодня
+
+В ходе данной лекции нам понадобятся следующие файлы "GSE89225_illumina_counts.csv", "conditions.csv", "human_mart.txt". Для начала убедимся в том, что мы можем эти файлы прочитать. И посмотрим, что в них находится.
+
+```{r load}
+counts <- read.csv("GSE89225_Illumina_counts.csv", row.names=1)
+conditions <- read.csv("conditions.csv", row.names=1)
+mart <- read.table("human_mart.txt", sep="\t", header=1, check.names = F)
+
+###TASK 1: studying the data and finding a suspicious variable (after ggplotly)
+counts$treg_NBP_patient3 <- NULL
+conditions <- conditions[rownames(conditions) != "treg_NBP_patient3",  ]
+###
+
+print(counts[1:6, 1:2])
+dim(counts)
+
+head(conditions)
+dim(conditions)
+
+head(mart)
+dim(mart)
+```
+
+# RNA-seq
+
+Rna-seq steps:
+
+* Изоляция РНК
+* __Rna selection / depletion__
++ __Фрагментация__
+* Синтез кДНК
+* Секвенирование
+
+Rna selection / depletion:
+
+* вся РНК
+* тянем за поли(А)-хвосты (только мРНК)
+* удаляем рибосомальную РНК (ribo-zero kit)
+* таргетное секвенирование
+
+Why Rna-seq?
+
+* Не ограничены существующей сборкой и дизайном микрочипа
+* Низкий фоновый сигнал
+* Точность позволяет смотреть экспрессию отдельных изоформ
+
+# Sanity checks
+Нужно всегда проверять длины библиотек и количество rRNA reads, которые оказались в библиотеке. Количество ридов можно проверять после выравнивания или после квантификации.
+
+```{r sanity_check}
+proteinCoding <- mart[mart[, 3] == "protein_coding", ]
+rRNA <- mart[mart[, 3] == "rRNA", ]
+
+pcCounts <- counts[rownames(counts) %in% as.character(proteinCoding[, 1]), ]
+rrnaCounts <- counts[rownames(counts) %in% as.character(rRNA[, 1]), ]
+
+sampleCount <- ncol(counts)
+toPlot <- data.frame(
+  sample=rep(colnames(counts), 3),
+  value=c(colSums(counts) - colSums(pcCounts) - colSums(rrnaCounts), 
+          colSums(pcCounts), 
+          colSums(rrnaCounts)),
+  type=c(rep("other", sampleCount), 
+         rep("protein coding", sampleCount),
+         rep("rrna", sampleCount))
+)
+
+plot <- ggplot(data=toPlot, aes(x=sample, y=value, fill=type)) +
+  geom_bar(stat="identity") + theme_bw() + 
+  theme(axis.text.x = element_text(angle=90, vjust=0.5))
+plot
+
+```
+
+
+# DESeq2
+DESeq2 -- это царь-библиотека необходимая для работы с данными RNA-seq. Тут и дифференциальная экспрессия, и нормализации, и PCA-plots.
+
+```{r deseq_prep, cache=TRUE, message=FALSE}
+dds <- DESeqDataSetFromMatrix(countData = counts,
+                              colData = conditions,
+                              design = ~ tissue + cells)
+dds <- dds[rowSums(counts(dds)) > 20, ]
+dds <- DESeq(dds)
+vst_dds <- vst(dds)
+counts.norm <- assay(vst_dds)
+
+
+###TASK 2: Volcano plot for tissue
+dds2 <- DESeqDataSetFromMatrix(countData = counts,
+                              colData = conditions,
+                              design = ~ cells + tissue)
+dds2 <- dds2[rowSums(counts(dds2)) > 20, ]
+dds2 <- DESeq(dds2)
+###
+```
+
+```{r PCA}
+pca_data <- prcomp(t(counts.norm))
+percents <- pca_data$sdev^2 / sum(pca_data$sdev^2)
+to_plot <- t(counts.norm) %*% pca_data$rotation
+
+gdata <- data.frame(
+  x=to_plot[, 1],
+  y=to_plot[, 2],
+  tissue=conditions[, 1],
+  cells=conditions[, 2],
+  name=rownames(conditions)
+)
+
+###TASK 1: here might be used library(plotly) #ggplotly()
+ggplot(data=gdata, aes(x=x, y=y, color=cells, shape=tissue, text=name)) +
+  geom_point(size=3) + theme_bw()  +
+  xlab(paste0("PC", 1, ": ", formatC(100 * percents[1], digits=4), "%")) +
+  ylab(paste0("PC", 2, ": ", formatC(100 * percents[2], digits=4), "%"))
+
+plotPCA(vst_dds, intgroup=c("tissue", "cells")) + theme_bw()
+```
+
+# Differential expression
+Давайте посмотрим, как выглядят результаты дифференциальной экспрессии и отсортируем их по статистике.
+
+```{r diff_exp}
+res <- results(dds)
+res
+mcols(res)$description
+res <- res[order(res[, 4]), ]
+res
+
+###TASK 2: Volcano plot for tissue
+res2 <- results(dds2)
+res2
+mcols(res2)$description
+res2 <- res2[order(res2[, 4]), ]
+res2
+###
+```
+
+Самый обычный способ визуализировать данные дифф.экспрессии -- это volcano plot. По оси x мы будем откладывать log fold change, а по y - adjusted p value.
+
+```{r volcano_plot}
+###TASK 2: Volcano plot for cells and tissue, coloured, with subline
+gdata <- data.frame(
+  x=res$log2FoldChange,
+  y=-log10(res$padj),
+  label = rep("Treg VS Tconv", nrow(res))
+)
+
+gdata2 <- data.frame(
+  x=res2$log2FoldChange,
+  y=-log10(res2$padj),
+  label = rep("Breast tumor VS Normal breast tissue", nrow(res2))
+)
+
+gdata_both <- rbind(gdata, gdata2)
+res_both <- rbind(res, res2)
+
+gdata_both <- gdata_both %>%
+  mutate(color = ifelse(res_both$padj < 0.01, "Significant", "Not significant"))
+gdata_both <- na.omit(gdata_both)
+
+
+ggplot(gdata_both, aes(x, y)) +
+  geom_point(aes(color = factor(color)), size=1) + theme_bw() + 
+  xlab("Log fold change") +
+  ylab("Adjusted p.value") +
+  facet_grid(. ~ label) +
+  geom_hline(yintercept=2, color="indianred") + 
+  scale_color_manual(values = c("Significant" = "coral", 
+                                "Not significant" = "black")) +
+  labs(colour="Significance")
+###
+```
+
+Также мы можем построить тепловую карту отсортировав гены по статистике
+
+```{r heatmap}
+counts.norm <- counts(dds, normalized=TRUE)
+# png("heatmap_large.png", width=6, height=20, units="in", res=300)
+
+to_visualise <- counts.norm[rownames(res), order(conditions[, 2])]
+to_visualise <- t(apply(to_visualise, 1, function(r) {
+  (r - min(r)) / (max(r) - min(r))
+}))
+
+pheatmap(to_visualise, 
+         show_rownames = F, cluster_rows = F,
+         cluster_cols=F,
+         annotation_col = conditions)
+# dev.off()
+
+###TASK 3: heatmap with genes from PATHWAY GO:0007159: leukocyte cell-cell adhesion
+kkeys <- keys(org.Hs.eg.db, keytype="ENSEMBL")
+goAnno <- AnnotationDbi::select(org.Hs.eg.db, keys=kkeys, 
+                                keytype="ENSEMBL", columns=c("GOALL", "ONTOLOGYALL", "SYMBOL"))
+goAnno <- tbl_df(goAnno)
+goAnno <- filter(goAnno, GOALL=="GO:0007159")
+# or you can pick ENTREZ, or SYMBOL, or whatever you want
+genesToVisualise <- goAnno$ENSEMBL
+##
+
+res <- results(dds)
+res <- res[order(res[, 4]), ]
+res_names <- rownames(res)
+
+#to_visualise_7159 <- counts.norm[genesToVisualise, ]
+to_visualise_7159 <- counts.norm[res_names, order(conditions[, 2])]
+#genesToVisualise <- rownames(res)[rownames(res) %in% genesToVisualise]
+##
+
+to_visualise_7159 <- to_visualise_7159[rownames(to_visualise_7159)%in% genesToVisualise, ]
+
+to_visualise_7159 <- t(apply(to_visualise_7159, 1, function(r) {
+  (r - min(r)) / (max(r) - min(r))
+}))
+
+pheatmap(to_visualise_7159, 
+         show_rownames = F, cluster_rows = F,
+         cluster_cols=F,
+         annotation_col = conditions,
+         main="GO:0007159: leukocyte cell-cell adhesion")
+###
+```
+
+После того, как мы сделали сравнения Treg vs Tconv и Tumor breast vs Normal breast, мы можем оценить есть ли у этих сравнения общие дифференциально экспрессированные гены. Для этого мы возьмем из обоих сравнений гены с p.adj<0.01 и построим диаграмму Венна
+```{r VennDiagram, cache=TRUE, message=FALSE}
+###TASK 4: VennDiagram for Treg vs Tconv & Tumor breast vs Normal breast
+setA <- rownames(na.omit(subset(res, res$padj < 0.01)))
+setB <- rownames(na.omit(subset(res2, res2$padj < 0.01)))
+
+commonGenes <- intersect(setA, setB)
+
+draw.pairwise.venn(length(setA), length(setB), length(commonGenes), category = c("Tumor tissue VS normal tissue", "Treg VS Tconv"), fill = c("cornflowerblue", "lightcoral"))
+###
+```
+
+# clusterProfiler
+
+Библиотека содержит в себе большое количество утилит для аннотации наборов генов.
+
+```{r clusterProfiler}
+
+genes <- bitr(rownames(res),
+              fromType = "ENSEMBL",
+              toType = c("ENTREZID", "SYMBOL"), 
+              OrgDb = org.Hs.eg.db)
+head(genes)
+
+
+genes <- genes[!duplicated(genes[, 1]), ]
+rownames(genes) <- genes[, 1]
+res$ENSEMBL <- rownames(res)
+
+merged <- merge(as.data.frame(res), genes)
+head(merged)
+```
+
+Давайте что-нибудь узнаем о дифф.экспрессированных генах!
+
+```{r go_annot}
+
+diffExpGenes <- merged[which(merged$padj < 0.01), 8]
+universe <- as.character(merged[, 8])
+
+ego <- enrichGO(gene          = diffExpGenes,
+                universe      = universe,
+                OrgDb         = org.Hs.eg.db,
+                ont           = "BP",
+                pAdjustMethod = "BH",
+                pvalueCutoff  = 0.01,
+                qvalueCutoff  = 0.05,
+        readable      = TRUE)
+# head(ego)
+dotplot(ego)
+```
