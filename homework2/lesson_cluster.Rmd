@@ -1,0 +1,141 @@
+---
+title: "clustering"
+author: "octopus"
+date: "April 4, 2017"
+output: html_document
+---
+
+```{r setup, message=FALSE}
+library(DESeq2)
+library(ggplot2)
+library(pheatmap)
+library(amap)
+library(dbscan)
+options(width=120)
+```
+
+Чаще всего при работе с данными экспрессии используется две кластеризации: иерархическая кластеризация в пространстве образцов и K-means в пространстве генов.
+
+В обоих случаях, мы будем использовать корреляцию (между образцами и между генами) как меру похожести для нашей кластеризации. И соотвественно 1 - cor(x, y) – как меру “непохожести”.
+
+Также в обоих случаях, мы сначала оставим только 8000 самых сильно эспрессированных генов. Это делается за тем, что мало экспрессированные гены привносят шум в “паттерны” экспрессии, а так же невольно завышают корреляцию между образцами: ведь они слабо экспрессированы во всех образцах.
+
+## Задание 1: иерархическая кластеризация (для обнаружения аутлаера)
+
+Возьмем весь датасет с аутлаером
+Создадим DeseqDataSet объект (дизайн не важен)
+Оставим только 8000 экспрессированых генов
+
+```{r load, cache=TRUE, message=FALSE}
+counts <- read.csv("GSE89225_Illumina_counts.csv", row.names=1)
+conditions <- read.csv("conditions.csv", row.names=1)
+mart <- read.table("human_mart.txt", sep="\t", header=1, check.names = F)
+
+dds <- DESeqDataSetFromMatrix(countData = counts,
+                              colData = conditions,
+                              design = ~ tissue + cells)
+
+dds_high_expr <- dds[order(rowSums(counts(dds)), decreasing = TRUE), ][1:8000, ]
+dds_high_expr <- DESeq(dds_high_expr)
+```
+
+Используем rlog(dds) для получения логарифмированных значений экспрессии
+Посчитаем корреляции между образцами используя cor (результатом будет матрица размера m×m, где m – количество образцов)
+```{r}
+dds_high_expr_log_cor <- cor(assay(rlog(dds_high_expr)))
+dds_high_expr_log_cor[1:2, ]
+```
+
+Посчитаем матрицу “непохожести” 1 - cor, и dist объект для этой матрицы
+```{r}
+dds_high_expr_log_revcor <- 1 - dds_high_expr_log_cor
+dds_high_expr_log_revcor_dist <- dist(dds_high_expr_log_revcor)
+```
+
+Сделаем кластеризацию с помощью функции hclust, используя три разных метода “связывания” объектов в группы: average, complete and single
+Построим для каждой график с помощью plot
+```{r}
+average_bind <- hclust(dds_high_expr_log_revcor_dist, method="average")
+complete_bind <- hclust(dds_high_expr_log_revcor_dist, method="complete")
+single_bind <- hclust(dds_high_expr_log_revcor_dist, method="single")
+
+plot(as.dendrogram(average_bind), ylab = "Height", xlab = "cors \n hclust (*, \"average\")", main = "Cluster Dendrogram")
+
+plot(as.dendrogram(complete_bind), ylab = "Height", xlab = "cors \n hclust (*, \"complete\")", main = "Cluster Dendrogram")
+
+plot(as.dendrogram(single_bind), ylab = "Height", xlab = "cors \n hclust (*, \"single\")", main = "Cluster Dendrogram")
+```
+
+## Задание 2: K-means для описания паттернов экспрессии
+
+Возьмем весь датасет без аутлаера
+Создадим DeseqDataSet объект (дизайн не важен)
+Оставим только 8000 экспрессированных генов
+
+```{r deseq_prep2, cache=TRUE, message=FALSE}
+counts$treg_NBP_patient3 <- NULL
+conditions <- conditions[rownames(conditions) != "treg_NBP_patient3",  ]
+
+dds <- DESeqDataSetFromMatrix(countData = counts,
+                              colData = conditions,
+                              design = ~ tissue + cells)
+
+dds_high_expr <- dds[order(rowSums(counts(dds)), decreasing = TRUE), ][1:8000, ]
+dds_high_expr <- DESeq(dds_high_expr)
+```
+
+Используем rlog(dds) для получения логарифмированных значений экспрессии
+```{r}
+dds_high_expr_log <- assay(rlog(dds_high_expr))
+dds_high_expr_log[1:2, ]
+```
+
+Используем функцию Kmeans из пакета amap с методом “correlation”, c количеством кластеров равным 6. (Вы можете выбрать своё количество кластеров), и максимальным количеством итераций равным 20000
+После этого вы можете достать соотвествие каждого гена кластеру с помощью элемента листа с названием “cluster”
+```{r}
+clustering <- Kmeans(dds_high_expr_log, 6, method="correlation", iter.max=20000)
+head(clustering$cluster)
+```
+
+После этого от вас потребуется эту кластеризацию изобразить на хитмапе: гены должны быть отсортированы по кластерам, а столбцы сначала по клеткам, а затем по тканям.
+```{r}
+to_visualise <- dds_high_expr_log[order(clustering$cluster), order(conditions[, 2], conditions[, 1])]
+to_visualise <- t(apply(to_visualise, 1, function(r) {
+  (r - min(r)) / (max(r) - min(r))
+}))
+
+pheatmap(to_visualise, 
+         show_rownames = F, cluster_rows = F,
+         cluster_cols=F,
+         annotation_col = conditions,
+         annotation_row = data.frame(cluster = as.factor(clustering$cluster)))
+
+# dev.off()
+```
+
+
+## Задание 3: Density based algortihms (DBSCAN) для нахождения “плотных” кластеров без априорного знания их числа 
+### *но аргументы ϵ и k мы всё же сами подбираем
+
+В архиве находится файлик projection.csv, который содержит в себе результаты анализа данных single-cell RNA-seq, а именно tSNE-проекции всех клеток. По сути каждая клетка здесь определена в двумерном пространстве, и клетки, транскрипционные профили которых бризки друг к другу, находятся на этой проекции близко, а те, что транскрипционно различаются, – находятся дальше.
+
+Базовая концепция алгоритма DBSCAN очень простая – для каждой точки, мы можем посмотреть количество точек-соседей, которые находятся к ней ближе какого-то расстояния ϵ. Если количество точек в этой ϵ-окрестности больше или равно заранее определенному числу k, и какие-то из этих точек-соседей уже лежат в кластере – то нашу точку можно в этот кластер добавить.
+
+Пакет dbscan доступен из CRAN, функция dbscan принимает, кроме объекта с точками в пространстве, два аргумента: радиус окружности вокруг точки ϵ, в которой мы пытаемся найти достаточноe число соседей, и достаточно число соседей k в этой окружности.
+
+```{r}
+projection <- read.csv("projection.csv")
+projection <- projection[ , 2:3]
+projection_dbscan <- dbscan(projection, eps = 4, minPts = 7)
+cluster <- as.factor(projection_dbscan$cluster)
+
+ggplot(projection, aes(x = TSNE.1, y = TSNE.2)) +
+  geom_point(size = 2)  +
+  xlab("TSNE.1") +
+  ylab("TSNE.2")
+
+ggplot(projection, aes(x = TSNE.1, y = TSNE.2, col = cluster)) +
+  geom_point(size = 2) + 
+  xlab("TSNE.1") +
+  ylab("TSNE.2")
+```
