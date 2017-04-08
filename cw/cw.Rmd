@@ -1,0 +1,173 @@
+---
+title: "cw"
+author: "octopus"
+date: '8 апреля 2017 г '
+output: html_document
+---
+
+```{r setup, message=FALSE}
+library(DESeq2)
+library(ggplot2)
+library(clusterProfiler)
+library(org.Hs.eg.db)
+library(pheatmap)
+library(dplyr)
+library(VennDiagram)
+library(amap)
+options(width=120)
+```
+
+
+```{r}
+conditions <- read.csv("GSE89633_conditions.tsv", sep="\t", row.names=1)
+counts <- read.csv("GSE89633_counts.tsv", sep="\t", row.names=1)  
+
+dds <- DESeqDataSetFromMatrix(countData = counts,
+                              colData = conditions,
+                              design = ~ cells + conditions)
+
+
+#dds <- dds[rowSums(counts(dds)) > 20, ]
+dds <- DESeq(dds)
+vst_dds <- vst(dds)
+counts.norm <- assay(vst_dds)
+
+
+pca_data <- prcomp(t(counts.norm))
+percents <- pca_data$sdev^2 / sum(pca_data$sdev^2)
+to_plot <- t(counts.norm) %*% pca_data$rotation
+
+gdata <- data.frame(
+  x=to_plot[, 1],
+  y=to_plot[, 2],
+  tissue=conditions[, 1],
+  cells=conditions[, 2],
+  name=rownames(conditions)
+)
+
+plotPCA(vst_dds, intgroup=c("conditions", "cells")) + theme_bw()
+
+
+
+
+dds_high_expr <- dds[order(rowSums(counts(dds)), decreasing = TRUE), ][1:8000, ]
+dds_high_expr <- DESeq(dds_high_expr)
+
+dds_high_expr_log <- assay(rlog(dds_high_expr))
+dds_high_expr_log[1:2, ]
+clustering <- Kmeans(dds_high_expr_log, 8, method="correlation", iter.max=20000)
+head(clustering$cluster)
+
+to_visualise <- dds_high_expr_log[order(clustering$cluster), order(conditions[, 2], conditions[, 1])]
+to_visualise <- t(apply(to_visualise, 1, function(r) {
+  (r - min(r)) / (max(r) - min(r))
+}))
+
+pheatmap(to_visualise, 
+         show_rownames = F, cluster_rows = F,
+         cluster_cols=F,
+         annotation_col = conditions,
+         annotation_row = data.frame(cluster = as.factor(clustering$cluster)))
+
+```
+
+```{r}
+df_FB <- conditions[grepl("cell type: FB", conditions$cells), ] 
+df_FAP <- conditions[grepl("cell type: FAP", conditions$cells), ] 
+df_SMP <- conditions[grepl("cell type: SMP", conditions$cells), ] 
+c_FB <- counts[rownames(df_FB)]
+c_FAP <- counts[rownames(df_FAP)]
+c_SMP <- counts[rownames(df_SMP)]
+
+
+
+dds_FB <- DESeqDataSetFromMatrix(countData = c_FB,
+                              colData = df_FB,
+                              design = ~ conditions)
+dds_FB <- DESeq(dds_FB)
+vst_dds_FB <- vst(dds_FB)
+FB_counts.norm <- assay(vst_dds_FB)
+
+
+
+dds_FAP <- DESeqDataSetFromMatrix(countData = c_FAP,
+                              colData = df_FAP,
+                              design = ~ conditions)
+dds_FAP <- DESeq(dds_FAP)
+vst_dds_FAP <- vst(dds_FAP)
+FAP_counts.norm <- assay(vst_dds_FAP)
+
+
+
+dds_SMP <- DESeqDataSetFromMatrix(countData = c_SMP,
+                              colData = df_SMP,
+                              design = ~ conditions)
+dds_SMP <- DESeq(dds_SMP)
+vst_dds_SMP <- vst(dds_SMP)
+SMP_counts.norm <- assay(vst_dds_SMP)
+#####################
+
+res1 <- results(dds_FB)
+res1
+mcols(res1)$description
+res1 <- res1[order(res1[, 4]), ]
+res1
+
+res2 <- results(dds_SMP)
+res2
+mcols(res2)$description
+res2 <- res2[order(res2[, 4]), ]
+res2
+
+res3 <- results(dds_FAP)
+res3
+mcols(res3)$description
+res3 <- res3[order(res3[, 4]), ]
+res3
+
+
+gdata1 <- data.frame(
+  x=res1$log2FoldChange,
+  y=-log10(res1$padj),
+  label = rep("FB", nrow(res1))
+)
+
+gdata2 <- data.frame(
+  x=res2$log2FoldChange,
+  y=-log10(res2$padj),
+  label = rep("SMP", nrow(res2))
+)
+
+gdata3 <- data.frame(
+  x=res3$log2FoldChange,
+  y=-log10(res3$padj),
+  label = rep("FAP", nrow(res3))
+)
+
+gdata_both <- rbind(gdata1, gdata2, gdata3)
+res_both <- rbind(res1, res2, res3)
+
+
+ggplot(gdata_both, aes(x, y)) +
+  geom_point(size=1) + theme_bw() + 
+  xlab("Log fold change") +
+  ylab("Adjusted p.value") +
+  facet_grid(. ~ label)
+```
+
+```{r}
+###TASK 4: VennDiagram for Treg vs Tconv & Tumor breast vs Normal breast
+setA <- rownames(na.omit(subset(res1, res1$padj < 0.01)))
+setB <- rownames(na.omit(subset(res2, res2$padj < 0.01)))
+setC <- rownames(na.omit(subset(res3, res3$padj < 0.01)))
+
+
+c <- intersect(setA, setB)
+b <- intersect(setA, setC)
+a <- intersect(setB, setC)
+d <- intersect(c, setC)
+
+draw.triple.venn(length(setA), length(setB), length(setC), length(c), length(a), length(b), length(d), category = c("SMP", "FB", "FAP"))
+###
+```
+
