@@ -1,0 +1,104 @@
+---
+title: "sql intro"
+author: "kzaitsev"
+date: "April 15, 2017"
+output: html_document
+---
+## Библиотеки, которые нам понадобятся
+```{r libs, warning=F, message=F}
+library(RSQLite)
+library(DBI)
+```
+
+## Workflow работы с бд
+
+* Создай соединение
+* Создадим наши таблицы
+* Disconnect
+
+```{r setup, warning=FALSE, message=F, cache=TRUE}
+mydb <- dbConnect(RSQLite::SQLite(), "test.sqlite")
+
+dbListTables(mydb)
+
+lines <- readLines("creation.sql")
+command <- paste(lines, collapse = " ")
+commands <- strsplit(command, ";")[[1]]
+
+tmp <- sapply(commands, dbExecute, conn=mydb)
+dbDisconnect(mydb)
+```
+
+## SELECT
+
+Команда SELECT отвечает за выемку данных из баз данных, в общем случае синтаксис SELECT очень длинный, но мы начнем с простого, постепенно увеличивая нашу конструкцию.
+
+
+Базовый синтаксис: 
+
+1. SELECT ЧТО FROM ОТКУДА;
+2. SELECT column_name1, column_name2 from table;
+3. SELECT * from table;
+
+
+```{r}
+mydb <- dbConnect(RSQLite::SQLite(), "test.sqlite")
+dbListTables(mydb)
+head(dbGetQuery(mydb, "SELECT * FROM students;"))
+head(dbGetQuery(mydb, "SELECT name, year FROM students;"))
+head(dbGetQuery(mydb, "SELECT * from courses;"))
+```
+
+## WHERE
+
+Конечно, нам можем понадобится не вся таблица, а лишь успевамость студентов за этот год, например. Для этого мы можем указать, ту часть отношения, которая нам интересна, с помощью ключевого слова WHERE.
+
+1. SELECT ЧТО FROM ОТКУДА WHERE условие;
+2. SELECT * FROM students WHERE year = 2016;
+```{r}
+dbGetQuery(mydb, "SELECT * FROM students WHERE year = 2016");
+dbGetQuery(mydb, "SELECT count(*) FROM students WHERE year = 2016");
+```
+
+## JOINS 
+
+Это всё, конечно, весело, но достаточно бесполезно, пока мы не смотрим на оценки
+
+```{r}
+head(dbGetQuery(mydb, "SELECT * FROM scores;"));
+```
+
+Мы бы хотели получить имена студентов для оценок. Для этого мы можем написать Join
+
+1. SELECT * FROM table1 join table2 using (colname1, colname2);
+2. SELECT * FROM table1 join table2 on colname1=colname2 (or another expression);
+3. SELECT * FROM table1 natural join table2;
+
+```{r}
+head(dbGetQuery(mydb, "SELECT * FROM scores natural join students;"));
+head(dbGetQuery(mydb, "SELECT * FROM scores join students using (student_id);"));
+head(dbGetQuery(mydb, "SELECT * FROM scores join students where students.student_id = scores.student_id;"));
+```
+
+## We gotta go deeper: MORE JOINS
+
+```{r}
+head(dbGetQuery(mydb, "SELECT name, course_name, score FROM 
+                scores natural join courses NATURAL JOIN students;"));
+```
+
+
+## Aggregation
+
+```{r}
+dbGetQuery(mydb, "SELECT name, sum(score) / 3.0 as mean FROM 
+                  scores natural join courses NATURAL JOIN students 
+                  where year = 2016 
+                  group by student_id 
+                  order by mean desc")
+
+dbGetQuery(mydb, "SELECT year, count(DISTINCT student_id), sum(score) * 1.0 / count(student_id) as mean FROM 
+                  scores natural join courses NATURAL JOIN students 
+                  group by year 
+                  order by mean desc")
+```
