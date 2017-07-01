@@ -31,7 +31,7 @@ for (i in 1:nrow(image_labels)) {
 ```
 
 
-## Часть 1. Увеличение количества картинок
+## Часть 1. Обработка данных
 
 В папке “patches” находится 168 jpg изображений размера 61x61. Этого количества, конечно, мало, поэтому было бы неплохо это количество увеличить. Как будем увеличивать? Картинку можно повернуть на какое-то количество градусов и зеркально отразить. Можно сдвинуть картинку на несколько пикселей. А ещё было бы неплохо применить ZCA whitening (подробнее можно почитать здесь https://en.wikipedia.org/wiki/Whitening_transformation) – это такое нормализующее преобразование, которое часто используется в обучении нейронных сетей.
 Первой частью нашего задания будет искусственное увеличение датасета с помощью функции Augmentation в пакете OpenImageR: хочется взять и каждую картинку случайно повернуть и немного сдвинуть и проделать это где-то ~50 раз.
@@ -115,17 +115,5 @@ model <- mx.model.FeedForward.create(nn.model,
                                      optimizer="adadelta",
                                      eval.metric = mx.metric.accuracy,
                                      epoch.end.callback = mx.callback.log.train.metric(10))
-```
-
-```{r}
-preds <- predict(model, train.array)
-preds_max <- sapply(as.data.frame(preds), function(x) max(x)*which.max(x))
-sqrt(mean((preds_max-train.y)^2))
-plot(preds_max, train.y)
-
-preds <- predict(model, test.array)
-preds_max <- sapply(as.data.frame(preds), function(x) max(x)*which.max(x))
-sqrt(mean((preds_max-test.y)^2))
-plot(preds_max, test.y)
 ```
 
