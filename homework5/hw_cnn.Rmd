@@ -1,0 +1,131 @@
+---
+title: "CNN_lungs"
+author: "octopus"
+date: '25 июня 2017 г '
+output: html_document
+---
+## Введение
+Данные, которые легли в основу этой домашки взяты из статьи http://image.diku.dk/lauges/publications/Sorensen2010.pdf, которая лежит в архиве с домашним заданием. Авторы данной статьи занимались квантификацией легочной эмфиземы, в связи с чем у этих ребят было некоторое количество изображений компьютерной томографии легких.
+Мы будем с вами классифицировать кусочки изображений на три класса: normal tissue (NT), centrilobular emphysema (CLE), paraseptal emphysema (PSE).
+Картинки по которым будем производить классификацию находятся в папке “patches”, для работы с изображениями будем использовать библиотеку OpenImageR.
+
+Данные: В папке patches лежат маленькие картинки – части изображений легких. В папке slices лежат изорабражения срезов легких целиком. В файле patch\_labels.csv лежит 168 чисел от 0 до 2: 0 for normal tissue (NT), 1 for centrilobular emphysema (CLE), 2 for paraseptal emphysema (PSE), описывает класс каждого изображения из папки patches. Вообще все эти слайсы и патчи от реальных пациентов, и там есть файлики, которые описывают это всё дело, но нас в этой работе будут интересовать только patches и patch_labels.
+
+```{r setup, message=FALSE}
+library(OpenImageR)
+library(mxnet)
+setwd("~/R-studio/rbio/KZ_cnn_hw")
+```
+
+```{r data reading}
+image_labels <- read.csv("patch_labels.csv", head=F)
+features <- 61 * 61
+
+nn.data.x <- matrix(0, nrow=nrow(image_labels), ncol=features)
+nn.data.y <- vector(length=nrow(image_labels))
+
+for (i in 1:nrow(image_labels)) {
+  nn.data.x[i, ] <- as.numeric(readImage(paste0("patches/patch", i, ".jpg")))
+  nn.data.y[i] <- image_labels[i, ]
+}
+```
+
+
+## Часть 1. Увеличение количества картинок
+
+В папке “patches” находится 168 jpg изображений размера 61x61. Этого количества, конечно, мало, поэтому было бы неплохо это количество увеличить. Как будем увеличивать? Картинку можно повернуть на какое-то количество градусов и зеркально отразить. Можно сдвинуть картинку на несколько пикселей. А ещё было бы неплохо применить ZCA whitening (подробнее можно почитать здесь https://en.wikipedia.org/wiki/Whitening_transformation) – это такое нормализующее преобразование, которое часто используется в обучении нейронных сетей.
+Первой частью нашего задания будет искусственное увеличение датасета с помощью функции Augmentation в пакете OpenImageR: хочется взять и каждую картинку случайно повернуть и немного сдвинуть и проделать это где-то ~50 раз.
+
+```{r image processing}
+set.seed(22)
+
+training.size <- 134
+validation.size <- 34
+training.set <- sample(1:nrow(image_labels), training.size)
+validation.set <- (1:nrow(image_labels))[-training.set]
+
+train.x <- matrix(0, training.size * 50, ncol=features)
+train.y <- vector(length=training.size * 50)
+test.x <- matrix(0, validation.size * 50, ncol=features)
+test.y <- vector(length=validation.size * 50)
+
+image_processing <- function(set){
+  n = 1
+  for (i in set) {
+    image <- matrix(nn.data.x[i, ], nrow = 61, ncol = 61)
+    for (j in 1:50) {
+      imageAugmented <- Augmentation(image, shift_cols = sample(1:30, 1), 
+                                     shift_rows = sample(1:30, 1), 
+                                     rotate_angle = sample(1:359, 1), 
+                                     rotate_method = 'bilinear', 
+                                     zca_comps = 30, zca_epsilon = 0.1, 
+                                     threads = 1, verbose = F)
+      if(length(set) == 134){
+        train.x[(n-1) * 50 + j, ] <<- as.numeric(as.vector(imageAugmented))
+        train.y[(n-1) * 50 + j] <<- nn.data.y[i]
+        }else{
+          test.x[(n-1) * 50 + j, ] <<- as.numeric(as.vector(imageAugmented))
+          test.y[(n-1) * 50 + j] <<- nn.data.y[i]
+        }
+    }
+    n = n + 1
+  }
+}
+
+image_processing(training.set)
+image_processing(validation.set)
+```
+
+## Часть 2. Собственно нейронная сеть
+
+eval.data содержит в себе валидирующие данные, такой запуск поможет нам сразу смотреть на ошибку train/test при обучении. 
+optimiser="adedelta" сходится чуть быстрее чем стохастический градиентный спуск. 
+eval.metric нам нужен ’accuracy` ибо мы решаем задачу классификации, 
+а epoch.end.callback – указывает, что нам бы показывать ошибку во время итераций.
+
+```{r network design and run}
+# можно сохранять состояния сети, чтобы выбрать потом наиболее удачное
+# epoch.end.callback=mx.callback.save.checkpoint("reload_chkpt")
+
+train.array <- t(train.x)
+dim(train.array) <- c(61, 61, 1, ncol(train.array))
+test.array <- t(test.x)
+dim(test.array) <- c(61, 61, 1, ncol(test.array))
+
+data <- mx.symbol.Variable('data')
+conv.1 <- mx.symbol.Convolution(data = data, kernel = c(5, 5), num_filter = 10)
+tanh.1 <- mx.symbol.Activation(data = conv.1, act_type = "tanh")
+pool.1 <- mx.symbol.Pooling(data=tanh.1, kernel=c(2, 2), stride=c(2, 2), pool.type="max")
+conv.2 <- mx.symbol.Convolution(data = pool.1, kernel = c(5, 5), num_filter = 10)
+tanh.2 <- mx.symbol.Activation(data = conv.2, act_type = "tanh")
+pool.2 <- mx.symbol.Pooling(data=tanh.2, kernel=c(2, 2), stride=c(2, 2), pool.type="max")
+fc.1 <- mx.symbol.FullyConnected(data = pool.2, num_hidden = 3)
+nn.model <- mx.symbol.SoftmaxOutput(data = fc.1)
+
+mx.set.seed(22)
+model <- mx.model.FeedForward.create(nn.model, 
+                                     X=train.array, 
+                                     y=as.array(train.y-1),
+                                     eval.data = list(
+                                       data=test.array,
+                                       label=as.array(test.y-1)
+                                     ),
+                                     ctx=mx.cpu(), 
+                                     num.round = 100,
+                                     optimizer="adadelta",
+                                     eval.metric = mx.metric.accuracy,
+                                     epoch.end.callback = mx.callback.log.train.metric(10))
+```
+
+```{r}
+preds <- predict(model, train.array)
+preds_max <- sapply(as.data.frame(preds), function(x) max(x)*which.max(x))
+sqrt(mean((preds_max-train.y)^2))
+plot(preds_max, train.y)
+
+preds <- predict(model, test.array)
+preds_max <- sapply(as.data.frame(preds), function(x) max(x)*which.max(x))
+sqrt(mean((preds_max-test.y)^2))
+plot(preds_max, test.y)
+```
+
